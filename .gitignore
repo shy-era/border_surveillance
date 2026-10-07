@@ -1,3 +1,147 @@
+# ==========================================
+# Byte-compiled / optimized / DLL files
+# ==========================================
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+*.dll
+
+# ==========================================
+# C/C++ build outputs & extensions
+# ==========================================
+*.o
+*.obj
+*.exe
+
+# ==========================================
+# Distribution / packaging
+# ==========================================
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================================
+# Virtual Environments
+# ==========================================
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+conda-meta/
+
+# ==========================================
+# Model Weights, Checkpoints & Large Artifacts
+# ==========================================
 checkpoints/
+*.pth
+*.pt
+*.pkl
+*.pickle
+*.ckpt
+*.h5
+*.hdf5
+*.onnx
+*.tflite
+*.weights
+*.bin
+*.pb
+*.safetensors
+
+# ==========================================
+# Datasets, Sample Data & Output Media
+# ==========================================
 data/
+dataset/
+datasets/
+raw_data/
+samples/
+outputs/
+results/
+predictions/
+runs/
+logs/
+wandb/
+lightning_logs/
+
+# ==========================================
+# Node / Frontend Dependencies & Package Managers
+# ==========================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+
+# ==========================================
+# Jupyter Notebooks & Caches
+# ==========================================
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# ==========================================
+# Unit test / coverage / profiling reports
+# ==========================================
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# ==========================================
+# IDEs, Editors & Tooling
+# ==========================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.cursor/
+
+# ==========================================
+# Operating System Files
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ==========================================
+# Secrets & Environment Variables
+# ==========================================
+.env*.local
+*.key
+*.pem
+secrets.json

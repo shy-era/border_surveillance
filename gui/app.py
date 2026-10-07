@@ -130,16 +130,34 @@ with st.sidebar:
 
     app_mode = st.radio(
         "Operating Mode",
-        ["Sector Simulation (Demo Presets)", "Upload Satellite Pair", "Model & Architecture Reference"],
+        ["Sector Simulation (Demo Presets)", "Upload Satellite Pair"],
         index=0
     )
     st.markdown("---")
-
     st.subheader("⚙️ Detection Parameters")
-    thresh_val = st.slider("Confidence Threshold", min_value=0.10, max_value=0.90, value=0.45, step=0.05)
-    min_cluster_val = st.slider("Min Cluster Filter (px)", min_value=5, max_value=80, value=15, step=5)
+    
+    filter_mode = st.selectbox(
+        "False-Positive Filter Mode",
+        ["High Precision (Anti-Noise)", "Balanced (Default)", "High Sensitivity (Fine-grained)"],
+        index=0,
+        help="High Precision eliminates shadows, natural seasonal foliage shifts, and registration jitter."
+    )
+    
+    if filter_mode == "High Precision (Anti-Noise)":
+        default_thresh = 0.55
+        default_min_cluster = 35
+    elif filter_mode == "Balanced (Default)":
+        default_thresh = 0.45
+        default_min_cluster = 20
+    else:
+        default_thresh = 0.35
+        default_min_cluster = 10
+
+    thresh_val = st.slider("Confidence Threshold", min_value=0.10, max_value=0.90, value=default_thresh, step=0.05)
+    min_cluster_val = st.slider("Min Cluster Filter (px)", min_value=5, max_value=120, value=default_min_cluster, step=5)
     gsd_val = st.selectbox("Ground Resolution (GSD)", [0.5, 1.0, 2.5], index=0, format_func=lambda x: f"{x} m/pixel (High-Res)")
-    backbone_choice = st.selectbox("Model Encoder Backbone", ["resnet18", "resnet34"], index=0)
+    match_light_val = st.checkbox("Radiometric Lighting Equalization", value=True, help="Equalizes sun shadow and atmospheric illumination differences.")
+    backbone_choice = st.selectbox("Model Encoder Backbone", ["resnet34", "resnet18"], index=0)
 
     st.markdown("---")
     checkpoint_file = os.path.join(PROJECT_ROOT, "checkpoints", "best_model.pth")
@@ -184,39 +202,54 @@ if app_mode == "Sector Simulation (Demo Presets)":
     if not os.path.exists(os.path.join(preset_dir, "A")):
         generate_all_samples(output_dir=preset_dir)
 
-    # Discover all available image pairs in dataset
-    dir_a = os.path.join(preset_dir, "A")
-    valid_files = sorted([
-        f for f in os.listdir(dir_a) 
-        if not f.startswith('.') and os.path.splitext(f)[1].lower() in ['.png', '.jpg', '.jpeg', '.tif', '.tiff']
-    ])
-
+    # Discover all available image pairs across datasets (LEVIR-CD, S2Looking, etc.)
     sectors = []
     base_lats = [34.1205, 34.2541, 33.9850, 34.0512, 34.3100, 34.1500, 34.2200, 34.0900]
     base_lons = [74.8320, 74.9182, 74.6521, 74.7745, 75.0120, 74.8800, 74.9500, 74.7200]
+    valid_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
 
-    for idx, fname in enumerate(valid_files):
-        sid = os.path.splitext(fname)[0]
-        # Clean display title
-        if sid.startswith("train_"):
-            num = sid.replace("train_", "")
-            stitle = f"LEVIR-CD Surveillance Tile #{num} ({fname})"
-        elif sid.startswith("sector_"):
-            stitle = sid.replace("_", " ").title()
-        else:
-            stitle = f"Sector {sid} ({fname})"
+    # 1. Check data/samples/A
+    dir_levir_a = os.path.join(preset_dir, "A")
+    if os.path.exists(dir_levir_a):
+        for idx, fname in enumerate(sorted(os.listdir(dir_levir_a))):
+            if not fname.startswith('.') and os.path.splitext(fname)[1].lower() in valid_exts:
+                sid = os.path.splitext(fname)[0]
+                num = sid.replace("train_", "") if sid.startswith("train_") else sid
+                stitle = f"[LEVIR-CD] Sector Tile #{num} ({fname})"
+                lat = base_lats[idx % len(base_lats)] + (idx * 0.0005)
+                lon = base_lons[idx % len(base_lons)] + (idx * 0.0005)
+                sectors.append({
+                    "id": sid,
+                    "name": stitle,
+                    "path_a": os.path.join(preset_dir, "A", fname),
+                    "path_b": os.path.join(preset_dir, "B", fname),
+                    "path_mask": os.path.join(preset_dir, "label", fname),
+                    "lat": round(lat, 6),
+                    "lon": round(lon, 6)
+                })
 
-        lat = base_lats[idx % len(base_lats)] + (idx * 0.0005)
-        lon = base_lons[idx % len(base_lons)] + (idx * 0.0005)
-
-        sectors.append({
-            "id": sid,
-            "filename": fname,
-            "name": stitle,
-            "lat": round(lat, 6),
-            "lon": round(lon, 6),
-            "desc": f"Bi-temporal satellite surveillance pair for {sid}."
-        })
+    # 2. Check data/samples/S2Looking or data/s2looking
+    s2_dirs = [os.path.join(preset_dir, "S2Looking"), os.path.join(PROJECT_ROOT, "data", "s2looking")]
+    for s2_root in s2_dirs:
+        s2_a = os.path.join(s2_root, "Image1") if os.path.exists(os.path.join(s2_root, "Image1")) else os.path.join(s2_root, "A")
+        s2_b = os.path.join(s2_root, "Image2") if os.path.exists(os.path.join(s2_root, "Image2")) else os.path.join(s2_root, "B")
+        s2_m = os.path.join(s2_root, "label") if os.path.exists(os.path.join(s2_root, "label")) else os.path.join(s2_root, "mask")
+        if os.path.exists(s2_a) and os.path.exists(s2_b):
+            for idx, fname in enumerate(sorted(os.listdir(s2_a))):
+                if not fname.startswith('.') and os.path.splitext(fname)[1].lower() in valid_exts:
+                    sid = f"s2_{os.path.splitext(fname)[0]}"
+                    stitle = f"[S2Looking] Sector Tile ({fname})"
+                    lat = base_lats[(idx + 3) % len(base_lats)] + (idx * 0.0004)
+                    lon = base_lons[(idx + 3) % len(base_lons)] + (idx * 0.0004)
+                    sectors.append({
+                        "id": sid,
+                        "name": stitle,
+                        "path_a": os.path.join(s2_a, fname),
+                        "path_b": os.path.join(s2_b, fname),
+                        "path_mask": os.path.join(s2_m, fname) if os.path.exists(s2_m) else None,
+                        "lat": round(lat, 6),
+                        "lon": round(lon, 6)
+                    })
 
     if not sectors:
         st.warning("No image pairs found. Please generate samples or upload imagery.")
@@ -225,7 +258,7 @@ if app_mode == "Sector Simulation (Demo Presets)":
     col_sel, col_btn = st.columns([4, 1])
     with col_sel:
         chosen_sector = st.selectbox(
-            f"Select Surveillance Sector for Analysis ({len(sectors)} Available Pairs)",
+            f"Select Surveillance Sector for Analysis ({len(sectors)} Available Pairs across LEVIR-CD & S2Looking)",
             sectors,
             format_func=lambda s: s["name"]
         )
@@ -234,9 +267,9 @@ if app_mode == "Sector Simulation (Demo Presets)":
         st.write("")
         run_scan = st.button("🚀 EXECUTE SECTOR SCAN", use_container_width=True)
 
-    img_a_path = os.path.join(preset_dir, "A", chosen_sector["filename"])
-    img_b_path = os.path.join(preset_dir, "B", chosen_sector["filename"])
-    mask_gt_path = os.path.join(preset_dir, "label", chosen_sector["filename"])
+    img_a_path = chosen_sector["path_a"]
+    img_b_path = chosen_sector["path_b"]
+    mask_gt_path = chosen_sector["path_mask"]
 
     img_a = Image.open(img_a_path)
     img_b = Image.open(img_b_path)
@@ -248,7 +281,8 @@ if app_mode == "Sector Simulation (Demo Presets)":
             img_b,
             threshold=thresh_val,
             base_lat=chosen_sector['lat'],
-            base_lon=chosen_sector['lon']
+            base_lon=chosen_sector['lon'],
+            match_lighting=match_light_val
         )
 
     threat = results['threat_info']
@@ -305,10 +339,16 @@ if app_mode == "Sector Simulation (Demo Presets)":
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Visual Inspection Matrix
-    tab_view, tab_geo, tab_manifest = st.tabs(["🖼️ Satellite Imaging Matrix", "🗺️ Tactical Sector Map", "📋 Target Intelligence Manifest"])
+    # Visual Inspection Matrix
+    tab_view, tab_feat, tab_geo, tab_manifest = st.tabs([
+        "🖼️ Satellite Imaging Matrix", 
+        "📐 Feature Engineering Matrix",
+        "🗺️ Tactical Sector Map", 
+        "📋 Target Intelligence Manifest"
+    ])
 
     with tab_view:
-        has_gt = os.path.isfile(mask_gt_path)
+        has_gt = os.path.isfile(mask_gt_path) if mask_gt_path else False
         cols = st.columns(5 if has_gt else 4)
         with cols[0]:
             st.markdown("**1. Time T1 (Baseline)**")
@@ -331,6 +371,43 @@ if app_mode == "Sector Simulation (Demo Presets)":
                 st.markdown("**5. Ground Truth Mask**")
                 st.image(Image.open(mask_gt_path), use_container_width=True)
                 st.caption("Benchmark Change Label")
+
+    with tab_feat:
+        st.markdown("##### 📐 Remote Sensing & Spatial Feature Engineering Suite")
+        st.caption("Classical multispectral indices, edge gradients, and texture entropy engineered to isolate structural anomalies from natural terrain shifts.")
+        
+        feats = results.get('engineered_features', {})
+        if feats:
+            f_cols = st.columns(4)
+            with f_cols[0]:
+                st.markdown("**🌿 Vegetation Loss Index (ΔVARI)**")
+                st.image(feats['vis_vari_rgb'], use_container_width=True)
+                st.caption("Atmospherically Resistant Veg Clearing")
+            with f_cols[1]:
+                st.markdown("**🏗️ Built-Up Emergence (ΔEBI)**")
+                st.image(feats['vis_ebi_rgb'], use_container_width=True)
+                st.caption("Engineered Built-up Concrete Index")
+            with f_cols[2]:
+                st.markdown("**📐 Structural Gradient (ΔSobel)**")
+                st.image(feats['vis_grad_rgb'], use_container_width=True)
+                st.caption("Sobel High-Frequency Edge Mag")
+            with f_cols[3]:
+                st.markdown("**🔬 Texture Entropy Shift**")
+                st.image(feats['vis_tex_rgb'] if 'vis_tex_rgb' in feats else feats['vis_comp_rgb'], use_container_width=True)
+                st.caption("Local Variance / Roughness Shift")
+
+            st.markdown("---")
+            st.markdown("###### 📊 Engineered Feature Statistical Signatures")
+            m = feats.get('metrics', {})
+            fm1, fm2, fm3, fm4 = st.columns(4)
+            with fm1:
+                st.metric("Vegetation Loss Score", f"{m.get('mean_veg_loss_index', 0.0):.4f}")
+            with fm2:
+                st.metric("Built-Up Emergence Score", f"{m.get('mean_builtup_emergence_index', 0.0):.4f}")
+            with fm3:
+                st.metric("Mean Edge Gradient", f"{m.get('mean_structural_gradient', 0.0):.1f} / 255")
+            with fm4:
+                st.metric("Texture Roughness Shift", f"{m.get('mean_texture_entropy_shift', 0.0):.1f} / 255")
 
     with tab_geo:
         st.markdown("##### 📍 Geospatial Tactical Positioning")
@@ -394,7 +471,7 @@ if app_mode == "Sector Simulation (Demo Presets)":
 # ==============================================================================
 # MODE 2: MANUAL IMAGE UPLOAD
 # ==============================================================================
-elif app_mode == "Upload Satellite Pair":
+else:
     st.subheader("📤 Upload Bi-Temporal Satellite Imagery")
     st.caption("Upload pre-change (Time 1) and post-change (Time 2) satellite tiles for AI change detection analysis.")
 
@@ -419,7 +496,14 @@ elif app_mode == "Upload Satellite Pair":
 
         if st.button("🚀 RUN SURVEILLANCE INFERENCE", use_container_width=True):
             with st.spinner("Analyzing uploaded bi-temporal satellite pair..."):
-                results = engine.predict(img_a, img_b, threshold=thresh_val, base_lat=user_lat, base_lon=user_lon)
+                results = engine.predict(
+                    img_a,
+                    img_b,
+                    threshold=thresh_val,
+                    base_lat=user_lat,
+                    base_lon=user_lon,
+                    match_lighting=match_light_val
+                )
 
             threat = results['threat_info']
             clusters = results['clusters']
@@ -452,86 +536,83 @@ elif app_mode == "Upload Satellite Pair":
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.markdown("**1. Time T1 (Before)**")
-                st.image(img_a, use_container_width=True)
-            with c2:
-                st.markdown("**2. Time T2 (After)**")
-                st.image(img_b, use_container_width=True)
-            with c3:
-                st.markdown("**3. Tactical Target Overlay**")
-                st.image(results['tactical_overlay'], use_container_width=True)
-            with c4:
-                st.markdown("**4. AI Probability Heatmap**")
-                st.image(results['heatmap_rgb'], use_container_width=True)
+            tab_u_view, tab_u_feat, tab_u_manifest = st.tabs([
+                "🖼️ Satellite Imaging Matrix", 
+                "📐 Feature Engineering Matrix", 
+                "📋 Target Intelligence Manifest"
+            ])
 
-            if clusters:
-                st.markdown("##### 📋 Detected Target Manifest")
-                df_u = pd.DataFrame([
-                    {
-                        "Target ID": c['id'],
-                        "Area (m²)": c['area_sqm'],
-                        "Area (px)": c['area_px'],
-                        "Centroid (X, Y)": f"({c['centroid'][0]}, {c['centroid'][1]})",
-                        "Bounding Box (X, Y, W, H)": str(c['bbox']),
-                        "Simulated Lat": c['lat'],
-                        "Simulated Lon": c['lon']
-                    } for c in clusters
-                ])
-                st.dataframe(df_u, use_container_width=True)
+            with tab_u_view:
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.markdown("**1. Time T1 (Before)**")
+                    st.image(img_a, use_container_width=True)
+                with c2:
+                    st.markdown("**2. Time T2 (After)**")
+                    st.image(img_b, use_container_width=True)
+                with c3:
+                    st.markdown("**3. Tactical Target Overlay**")
+                    st.image(results['tactical_overlay'], use_container_width=True)
+                with c4:
+                    st.markdown("**4. AI Probability Heatmap**")
+                    st.image(results['heatmap_rgb'], use_container_width=True)
 
-                csv_data_u = df_u.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    "📥 Export Target Manifest (CSV)",
-                    data=csv_data_u,
-                    file_name="uploaded_target_manifest.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.success("✅ No unauthorized structural changes detected between uploaded images.")
+            with tab_u_feat:
+                st.markdown("##### 📐 Remote Sensing & Spatial Feature Engineering Suite")
+                feats_u = results.get('engineered_features', {})
+                if feats_u:
+                    fc1, fc2, fc3, fc4 = st.columns(4)
+                    with fc1:
+                        st.markdown("**🌿 Vegetation Loss Index (ΔVARI)**")
+                        st.image(feats_u['vis_vari_rgb'], use_container_width=True)
+                    with fc2:
+                        st.markdown("**🏗️ Built-Up Emergence (ΔEBI)**")
+                        st.image(feats_u['vis_ebi_rgb'], use_container_width=True)
+                    with fc3:
+                        st.markdown("**📐 Structural Gradient (ΔSobel)**")
+                        st.image(feats_u['vis_grad_rgb'], use_container_width=True)
+                    with fc4:
+                        st.markdown("**🔬 Texture Entropy Shift**")
+                        st.image(feats_u['vis_comp_rgb'], use_container_width=True)
 
+                    st.markdown("---")
+                    st.markdown("###### 📊 Statistical Feature Signatures")
+                    mu = feats_u.get('metrics', {})
+                    um1, um2, um3, um4 = st.columns(4)
+                    with um1:
+                        st.metric("Vegetation Loss Score", f"{mu.get('mean_veg_loss_index', 0.0):.4f}")
+                    with um2:
+                        st.metric("Built-Up Emergence Score", f"{mu.get('mean_builtup_emergence_index', 0.0):.4f}")
+                    with um3:
+                        st.metric("Mean Edge Gradient", f"{mu.get('mean_structural_gradient', 0.0):.1f} / 255")
+                    with um4:
+                        st.metric("Texture Roughness Shift", f"{mu.get('mean_texture_entropy_shift', 0.0):.1f} / 255")
 
-# ==============================================================================
-# MODE 3: MODEL ARCHITECTURE & VIVA GUIDE
-# ==============================================================================
-else:
-    st.subheader("📚 Research Architecture & Viva Reference Guide")
-    st.markdown("""
-    ### 1. Siamese U-Net Architecture Overview
-    In remote sensing change detection, bi-temporal images **$T_1$** (Before) and **$T_2$** (After) are fed into a **weight-shared Siamese ResNet encoder**.
-    
-    ```
-    Image T1 ──► [ ResNet Encoder (Shared) ] ──► Features F1 (5 scales) ┐
-                                                                       ├──► [ Multi-Scale Fusion: |F1 - F2| + Concat ] ──► [ U-Net Decoder ] ──► Change Mask
-    Image T2 ──► [ ResNet Encoder (Shared) ] ──► Features F2 (5 scales) ┘
-    ```
+            with tab_u_manifest:
+                if clusters:
+                    st.markdown("##### 📋 Detected Target Manifest")
+                    df_u = pd.DataFrame([
+                        {
+                            "Target ID": c['id'],
+                            "Area (m²)": c['area_sqm'],
+                            "Area (px)": c['area_px'],
+                            "Centroid (X, Y)": f"({c['centroid'][0]}, {c['centroid'][1]})",
+                            "Bounding Box (X, Y, W, H)": str(c['bbox']),
+                            "Simulated Lat": c['lat'],
+                            "Simulated Lon": c['lon']
+                        } for c in clusters
+                    ])
+                    st.dataframe(df_u, use_container_width=True)
 
-    #### Key Mathematical Formulations:
-    - **Multi-Scale Feature Fusion**:
-      $$F_{fused}^{(i)} = \text{Conv}_{1\times 1} \left( [F_1^{(i)}, F_2^{(i)}, |F_1^{(i)} - F_2^{(i)}|] \right)$$
-    - **Combined Loss Function (BCE + Dice Loss)**:
-      $$\mathcal{L}_{total} = \alpha \cdot \mathcal{L}_{BCE} + (1 - \alpha) \cdot \mathcal{L}_{Dice}$$
-      $$\mathcal{L}_{Dice} = 1 - \frac{2 |P \cap Y| + \epsilon}{|P| + |Y| + \epsilon}$$
-      *Handles extreme class imbalance where structural changes account for $< 5\%$ of satellite pixels.*
-
-    ---
-
-    ### 2. Standard Benchmark Datasets
-    - **LEVIR-CD**: 637 bi-temporal pairs of $1024 \times 1024$ high-resolution ($0.5\text{m}$) satellite images focused on building appearance/disappearance.
-    - **WHU-CD**: Aerial imagery building change detection dataset with $0.2\text{m}$ resolution.
-    - **OSCD (Onera Satellite Change Detection)**: Sentinel-2 multispectral 13-band satellite pairs.
-
-    ---
-
-    ### 3. Key Viva Questions & Answers
-    1. **Why Siamese architecture instead of simple image subtraction?**
-       *Direct image subtraction ($I_1 - I_2$) fails due to illumination changes, seasonal foliage variations, and atmospheric haze. Siamese deep features capture semantic geometry rather than raw pixel intensities.*
-    2. **Why combine BCE Loss with Dice Loss?**
-       *Satellite change masks have severe background dominance ($95\%+$ unchanged). BCE alone causes the model to predict all zeros. Dice Loss directly optimizes the overlap metric.*
-    3. **How does post-processing reduce false alarms?**
-       *Morphological opening removes isolated pixel noise; connected-component area thresholding filters out transient vehicle or sensor artifacts.*
-    """)
+                    csv_data_u = df_u.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        "📥 Export Target Manifest (CSV)",
+                        data=csv_data_u,
+                        file_name="uploaded_target_manifest.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.success("✅ No unauthorized structural changes detected between uploaded images.")
 
 st.markdown("---")
 st.caption("AEGIS-SAT Border Surveillance AI System | Developed for Academic Research & Evaluation")

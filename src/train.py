@@ -1,6 +1,14 @@
 import os
+import sys
 import argparse
 import time
+from typing import Optional
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import torch
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
@@ -15,17 +23,19 @@ def train_model(
     data_dir: str = 'data/samples',
     epochs: int = 10,
     batch_size: int = 4,
-    lr: float = 1e-4,
-    backbone: str = 'resnet18',
+    lr: float = 2e-4,
+    image_size: int = 512,
+    backbone: str = 'resnet34',
     save_dir: str = 'checkpoints',
-    val_ratio: float = 0.2
+    val_ratio: float = 0.2,
+    resume: Optional[str] = None
 ):
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"=== Starting Training on Device: {device} | Backbone: {backbone} ===")
+    print(f"=== Starting Training on Device: {device} | Backbone: {backbone} | Image Size: {image_size}x{image_size} ===")
 
     # Prepare Dataset
-    full_dataset = SatelliteChangeDataset(root_dir=data_dir, image_size=256, is_train=True)
+    full_dataset = SatelliteChangeDataset(root_dir=data_dir, image_size=image_size, is_train=True)
     if len(full_dataset) == 0:
         raise ValueError(f"No image pairs found in {data_dir}. Run `python -m src.generate_samples` first.")
 
@@ -44,7 +54,14 @@ def train_model(
 
     # Model, Optimizer, Loss, Scheduler
     model = create_model(backbone=backbone, pretrained=True).to(device)
-    criterion = BCEDiceLoss(alpha=0.5)
+    if resume and os.path.isfile(resume):
+        try:
+            model.load_state_dict(torch.load(resume, map_location=device))
+            print(f"[Train] Resumed model weights from: {resume}")
+        except Exception as e:
+            print(f"[Train] Notice: Could not resume from {resume}: {e}")
+
+    criterion = BCEDiceLoss(alpha=0.6, pos_weight=1.5)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
@@ -113,19 +130,23 @@ def train_model(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train Siamese U-Net for Border Surveillance Change Detection")
-    parser.add_argument('--data_dir', type=str, default='data/samples', help='Path to dataset root directory')
-    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=2, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--backbone', type=str, default='resnet18', choices=['resnet18', 'resnet34'], help='Backbone')
-    parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save model weights')
+    parser.add_argument('--data_dir', '--data-dir', dest='data_dir', type=str, default='data', help='Path to dataset root directory or parent data/ directory to combine all datasets')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of epochs')
+    parser.add_argument('--batch_size', '--batch-size', dest='batch_size', type=int, default=4, help='Batch size')
+    parser.add_argument('--image_size', '--image-size', dest='image_size', type=int, default=512, help='Input image resolution')
+    parser.add_argument('--lr', type=float, default=2e-4, help='Learning rate')
+    parser.add_argument('--backbone', type=str, default='resnet34', choices=['resnet18', 'resnet34'], help='Backbone')
+    parser.add_argument('--save_dir', '--save-dir', dest='save_dir', type=str, default='checkpoints', help='Directory to save model weights')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume training from')
 
     args = parser.parse_args()
     train_model(
         data_dir=args.data_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        image_size=args.image_size,
         lr=args.lr,
         backbone=args.backbone,
-        save_dir=args.save_dir
+        save_dir=args.save_dir,
+        resume=args.resume
     )

@@ -1,7 +1,7 @@
 import os
 import glob
 import random
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Union
 from PIL import Image
 import numpy as np
 import torch
@@ -12,121 +12,113 @@ import torchvision.transforms.functional as TF
 class SatelliteChangeDataset(Dataset):
     """
     PyTorch Dataset for Bi-temporal Satellite Change Detection.
-    Supports standard benchmark layouts (LEVIR-CD, WHU, OSCD):
+    Supports standard benchmark layouts (LEVIR-CD, S2Looking, WHU, OSCD):
       root_dir/
-        ├── A/ or before/  (Image T1 - Pre-change)
-        ├── B/ or after/   (Image T2 - Post-change)
-        └── label/ or mask/ (Binary Change Mask)
+        ├── A/ or Image1/ or before/  (Image T1 - Pre-change)
+        ├── B/ or Image2/ or after/   (Image T2 - Post-change)
+        └── label/ or mask/           (Binary Change Mask)
+    Can also accept a list of directories or automatically aggregate all dataset folders under `data/`.
     """
     def __init__(
         self,
-        root_dir: str,
-        image_size: int = 256,
+        root_dir: Union[str, List[str]] = 'data',
+        image_size: int = 512,
         is_train: bool = True,
         transform: bool = True
     ):
-        self.root_dir = root_dir
         self.image_size = image_size
         self.is_train = is_train
         self.transform = transform
+        self.image_pairs: List[Tuple[str, str, Optional[str]]] = []
 
-        self.dir_a, self.dir_b, self.dir_mask = self._find_subdirectories(root_dir)
-        self.image_pairs = self._match_image_pairs()
+        # Candidate folder names across all datasets (LEVIR-CD, S2Looking, WHU)
+        self.a_candidates = ['A', 'Image1', 'image1', 'img1', 'before', 'pre', 't1', 'time1']
+        self.b_candidates = ['B', 'Image2', 'image2', 'img2', 'after', 'post', 't2', 'time2']
+        self.mask_candidates = ['label', 'label_binary', 'mask', 'masks', 'labels', 'out', 'ground_truth']
 
-        if len(self.image_pairs) == 0:
-            print(f"Warning: No valid image pairs found in {root_dir}")
+        dirs_to_scan = [root_dir] if isinstance(root_dir, str) else root_dir
+        
+        for d in dirs_to_scan:
+            self._discover_and_add_pairs(d)
 
-    def _find_subdirectories(self, root: str) -> Tuple[str, str, Optional[str]]:
-        # Candidate names
-        a_candidates = ['A', 'before', 'pre', 't1', 'time1']
-        b_candidates = ['B', 'after', 'post', 't2', 'time2']
-        mask_candidates = ['label', 'label_binary', 'mask', 'masks', 'labels', 'out', 'ground_truth']
+        print(f"[Dataset] Total combined bi-temporal pairs loaded: {len(self.image_pairs)}")
 
-        def _search_in(dir_path: str):
-            da, db, dm = None, None, None
-            if not os.path.exists(dir_path):
-                return None, None, None
-            for cand in a_candidates:
-                p = os.path.join(dir_path, cand)
-                if os.path.isdir(p):
-                    da = p
-                    break
-            for cand in b_candidates:
-                p = os.path.join(dir_path, cand)
-                if os.path.isdir(p):
-                    db = p
-                    break
-            for cand in mask_candidates:
-                p = os.path.join(dir_path, cand)
-                if os.path.isdir(p):
-                    dm = p
-                    break
-            return da, db, dm
-
-        # 1. Direct search in provided root
-        dir_a, dir_b, dir_mask = _search_in(root)
-
-        # 2. If not found, check subdirectories or common dataset folders
-        if not dir_a or not dir_b:
-            fallback_dirs = [
-                os.path.join('data', 'samples'),
-                os.path.join('data', 'LEVIR-CD'),
-                'data',
-                os.path.join(os.path.dirname(root), 'samples'),
-                os.path.join(os.path.dirname(root), 'LEVIR-CD')
-            ]
-            for fb in fallback_dirs:
-                if os.path.isdir(fb):
-                    da, db, dm = _search_in(fb)
-                    if da and db:
-                        dir_a, dir_b, dir_mask = da, db, dm
-                        print(f"[Dataset] Note: Redirected data search to detected directory: {fb}")
-                        break
-
-        # 3. If still not found, recursive search
-        if not dir_a or not dir_b:
-            for parent, dirs, _ in os.walk('data' if os.path.exists('data') else '.'):
-                da, db, dm = _search_in(parent)
-                if da and db:
-                    dir_a, dir_b, dir_mask = da, db, dm
-                    print(f"[Dataset] Note: Found dataset via scan in: {parent}")
-                    break
-
-        return dir_a or root, dir_b or root, dir_mask
-
-    def _match_image_pairs(self) -> List[Tuple[str, str, Optional[str]]]:
-        pairs = []
-        if not os.path.exists(self.dir_a):
-            return pairs
+    def _discover_and_add_pairs(self, root: str):
+        if not os.path.exists(root):
+            return
 
         valid_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
-        filenames = [
-            f for f in os.listdir(self.dir_a) 
-            if not f.startswith('.') and os.path.splitext(f)[1].lower() in valid_exts
+
+        # Helper to check if a directory has standard A/B/label structure
+        def _check_dir(da, db, dm):
+            if not da or not db or not os.path.isdir(da) or not os.path.isdir(db):
+                return
+            filenames = [
+                f for f in os.listdir(da)
+                if not f.startswith('.') and os.path.splitext(f)[1].lower() in valid_exts
+            ]
+            added = 0
+            for fname in filenames:
+                path_a = os.path.join(da, fname)
+                path_b = os.path.join(db, fname)
+                path_mask = os.path.join(dm, fname) if (dm and os.path.isdir(dm)) else None
+
+                if not os.path.exists(path_b):
+                    base_name = os.path.splitext(fname)[0]
+                    matched_b = glob.glob(os.path.join(db, f"{base_name}.*"))
+                    if matched_b:
+                        path_b = matched_b[0]
+                    else:
+                        continue
+
+                if path_mask and not os.path.exists(path_mask):
+                    base_name = os.path.splitext(fname)[0]
+                    matched_mask = glob.glob(os.path.join(dm, f"{base_name}.*"))
+                    path_mask = matched_mask[0] if matched_mask else None
+
+                self.image_pairs.append((path_a, path_b, path_mask, None))
+                added += 1
+            if added > 0:
+                print(f"[Dataset] Loaded {added} pairs from: {da} & {db}")
+
+        # Check for WHU Building Change Detection Dataset layout
+        for split in ['train', 'test']:
+            whu_patterns = [
+                os.path.join(root, '**', '1. The two-period image data'),
+                os.path.join(root, '1. The two-period image data'),
+                os.path.join(root, '**', 'WHU*')
+            ]
+            for pat in whu_patterns:
+                for match_dir in glob.glob(pat, recursive=True):
+                    whu_a_img = os.path.join(match_dir, '2012', 'splited_images', split, 'image')
+                    whu_b_img = os.path.join(match_dir, '2016', 'splited_images', split, 'image')
+                    whu_a_lbl = os.path.join(match_dir, '2012', 'splited_images', split, 'label')
+                    whu_b_lbl = os.path.join(match_dir, '2016', 'splited_images', split, 'label')
+
+                    if os.path.isdir(whu_a_img) and os.path.isdir(whu_b_img):
+                        filenames = [f for f in os.listdir(whu_a_img) if os.path.splitext(f)[1].lower() in valid_exts]
+                        whu_added = 0
+                        for fname in filenames:
+                            pa = os.path.join(whu_a_img, fname)
+                            pb = os.path.join(whu_b_img, fname)
+                            pla = os.path.join(whu_a_lbl, fname) if os.path.isdir(whu_a_lbl) else None
+                            plb = os.path.join(whu_b_lbl, fname) if os.path.isdir(whu_b_lbl) else None
+                            if os.path.exists(pb):
+                                self.image_pairs.append((pa, pb, pla, plb))
+                                whu_added += 1
+                        if whu_added > 0:
+                            print(f"[Dataset] Loaded {whu_added} WHU [{split}] pairs from {match_dir}")
+
+        # Standard check for LEVIR-CD and S2Looking directories
+        known_roots = [
+            (os.path.join(root, 'samples', 'A'), os.path.join(root, 'samples', 'B'), os.path.join(root, 'samples', 'label')),
+            (os.path.join(root, 'A'), os.path.join(root, 'B'), os.path.join(root, 'label')),
+            (os.path.join(root, 'samples', 'S2Looking', 'Image1'), os.path.join(root, 'samples', 'S2Looking', 'Image2'), os.path.join(root, 'samples', 'S2Looking', 'label')),
+            (os.path.join(root, 'S2Looking', 'Image1'), os.path.join(root, 'S2Looking', 'Image2'), os.path.join(root, 'S2Looking', 'label')),
+            (os.path.join(root, 's2looking', 'Image1'), os.path.join(root, 's2looking', 'Image2'), os.path.join(root, 's2looking', 'label'))
         ]
-
-        for fname in sorted(filenames):
-            path_a = os.path.join(self.dir_a, fname)
-            path_b = os.path.join(self.dir_b, fname)
-            path_mask = os.path.join(self.dir_mask, fname) if self.dir_mask else None
-
-            if not os.path.exists(path_b):
-                # Try matching by base name
-                base_name = os.path.splitext(fname)[0]
-                matched_b = glob.glob(os.path.join(self.dir_b, f"{base_name}.*"))
-                if matched_b:
-                    path_b = matched_b[0]
-                else:
-                    continue
-
-            if path_mask and not os.path.exists(path_mask):
-                base_name = os.path.splitext(fname)[0]
-                matched_mask = glob.glob(os.path.join(self.dir_mask, f"{base_name}.*"))
-                path_mask = matched_mask[0] if matched_mask else None
-
-            pairs.append((path_a, path_b, path_mask))
-
-        return pairs
+        for da, db, dm in known_roots:
+            _check_dir(da, db, dm)
 
     def __len__(self) -> int:
         return len(self.image_pairs)
@@ -187,13 +179,45 @@ class SatelliteChangeDataset(Dataset):
         return t_a, t_b, t_mask
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]:
-        path_a, path_b, path_mask = self.image_pairs[idx]
+        item = self.image_pairs[idx]
+        if len(item) == 4:
+            path_a, path_b, path_mask_a, path_mask_b = item
+        else:
+            path_a, path_b, path_mask_a = item
+            path_mask_b = None
+
         img_a = Image.open(path_a).convert('RGB')
         img_b = Image.open(path_b).convert('RGB')
 
         mask = None
-        if path_mask and os.path.exists(path_mask):
-            mask = Image.open(path_mask).convert('L')
+        if path_mask_b and os.path.exists(path_mask_b) and path_mask_a and os.path.exists(path_mask_a):
+            # Compute change mask dynamically between two temporal building masks (WHU)
+            ma = np.array(Image.open(path_mask_a).convert('L')) > 128
+            mb = np.array(Image.open(path_mask_b).convert('L')) > 128
+            change_arr = (np.bitwise_xor(ma, mb).astype(np.uint8)) * 255
+            mask = Image.fromarray(change_arr)
+        elif path_mask_a and os.path.exists(path_mask_a):
+            mask = Image.open(path_mask_a).convert('L')
+
+        # Negative Pair Augmentation during training (25% probability):
+        # Pass identical image with lighting/color jitter and zero-change mask
+        # Teaches Siamese network to be strictly invariant to lighting & natural unchanged terrain
+        if self.is_train and random.random() < 0.25:
+            # Pick img_a or img_b as reference
+            base_img = img_a if random.random() > 0.5 else img_b
+            # Create perturbed version with slight brightness/contrast/hue jitter
+            jittered = base_img.copy()
+            if random.random() > 0.5:
+                jittered = TF.adjust_brightness(jittered, random.uniform(0.8, 1.25))
+            if random.random() > 0.5:
+                jittered = TF.adjust_contrast(jittered, random.uniform(0.85, 1.2))
+            if random.random() > 0.5:
+                jittered = TF.adjust_saturation(jittered, random.uniform(0.8, 1.2))
+
+            t_a, t_b, _ = self._apply_augmentations(base_img, jittered, None)
+            t_mask = torch.zeros(1, self.image_size, self.image_size)
+            sample_name = f"neg_{os.path.splitext(os.path.basename(path_a))[0]}"
+            return t_a, t_b, t_mask, sample_name
 
         t_a, t_b, t_mask = self._apply_augmentations(img_a, img_b, mask)
         sample_name = os.path.splitext(os.path.basename(path_a))[0]
